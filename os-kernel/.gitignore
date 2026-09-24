@@ -1,0 +1,16 @@
+# 编译/链接产物（make 可重建，不纳入版本控制）
+*.o
+*.d
+*.asm
+*.sym
+*.img
+kernel/kernel
+mkfs/mkfs
+user/usys.S
+_*
+.gdbinit
+TAGS
+
+# 编辑器/系统垃圾
+*~
+.DS_Store
