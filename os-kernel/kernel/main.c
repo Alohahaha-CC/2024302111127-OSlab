@@ -1,21 +1,17 @@
 /*
- * lab1 main.c —— S 态主函数: 打印个性化 banner + 自检 + printf 边界, 然后停机。
+ * lab2 main.c —— S 态主函数: banner 回归 + 建立内核页表/进程/中断环境,
+ * 然后进入调度器, 首个进程(sh)在 forkret 里 exec("sh") 后进入用户态。
  *
- * 学号 2024302111127 → 协议 2(整行 + ASCII 校验和)、mod97=0xe、栈 12KB、
- * 节流周期 16 + 学号%16 = 23 字节。
- * banner 精确文本(与 expect_banner.txt 逐字节一致):
- *   OSLAB1 sid=2024302111127 mod97=0xe\n[chk=2275]
+ * lab1 回归: 个性化 banner(协议 2)照常打出。
  */
 #include "types.h"
+#include "param.h"
+#include "memlayout.h"
 #include "riscv.h"
+#include "defs.h"
 #include "course_sid.h"
 
-void consoleinit(void);
-int printf(const char *fmt, ...);
-int snprintf(char *buf, int n, const char *fmt, ...);
-
-// 协议 2 的校验和: 对整行正文(不含末尾换行、不含 [chk=] 本身)逐字节 ASCII 求和。
-// 算法自定, 但必须与内核实际输出自洽(此处与打印共用同一份 snprintf 结果)。
+// 协议 2 校验和: 对整行正文逐字节 ASCII 求和(与 lab1 自洽)。
 static int
 banner_checksum(const char *body)
 {
@@ -28,29 +24,33 @@ banner_checksum(const char *body)
 void
 main()
 {
-  consoleinit();   // 初始化 16550 UART(轮询模式)
+  if (cpuid() != 0) {
+    // 从核不应跑到这里(entry.S 已 park), 兜底自旋。
+    for (;;)
+      asm volatile("wfi");
+  }
 
-  // ---- 1) 个性化 banner(协议 2) ----
-  // 先拼出正文 body, 对其求校验和, 再一次性输出, 保证与 expect_banner.txt 自洽。
+  consoleinit(); // 初始化 UART(开接收中断)
+
+  // ---- lab1 回归: banner(协议 2) ----
   char body[64];
   snprintf(body, sizeof(body), "OSLAB1 sid=%ld mod97=0x%x",
            (long)COURSE_SID, (unsigned)(COURSE_SID % 97));
   printf("%s\n[chk=%d]", body, banner_checksum(body));
 
-  // ---- 2) printf 边界自检(数字 0 / 负数 / 最大整数 / 空串 / 超长串) ----
-  printf("\n== printf boundary ==\n");
-  printf("[zero] d=%d u=%u x=0x%x\n", 0, 0, 0);
-  printf("[neg ] d=%d d=%d d=%d\n", -1, -12345, -2147483647);
-  printf("[max ] ld=%ld lx=0x%lx\n",
-         (long)0x7fffffffffffffffL, 0x7fffffffffffffffUL);
-  printf("[empty] <%s>\n", "");
-  printf("[long ] <%s>\n",
-         "0123456789abcdef0123456789abcdef0123456789abcdef"
-         "0123456789abcdef0123456789abcdef0123456789abcdef"
-         "0123456789abcdef0123456789abcdef0123456789abcdef"
-         "0123456789abcdef0123456789abcdef0123456789abcdef");
+  printf("\nOSLAB2: traps, syscalls, interrupt-driven console\n");
 
-  // ---- 3) 停机: 裸机内核跑完自检后驻留(无中断, wfi 即停) ----
-  for (;;)
-    asm volatile("wfi");
+  // ---- 建立环境 ----
+  kinit();         // 页分配器(起点 = 内核镜像 end)
+  kvminit();       // 建内核页表
+  kvminithart();   // 打开分页
+  procinit();      // 进程表 + 内核栈映射
+  trapinit();      // 时钟锁
+  trapinithart();  // 内核态陷入向量
+  plicinit();      // PLIC 优先级
+  plicinithart();  // 使能 UART 中断
+
+  // ---- 首个用户进程(sh), 然后交给调度器 ----
+  userinit();
+  scheduler(); // 永不返回
 }

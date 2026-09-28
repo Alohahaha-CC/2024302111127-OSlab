@@ -7,6 +7,9 @@
 kernel/kernel
 mkfs/mkfs
 user/usys.S
+kernel/userimg.S
+user-flat/
+inject_uart.log
 _*
 .gdbinit
 TAGS

@@ -2,6 +2,9 @@
  * 说明: RISC-V CSR 名与读写指令(环境事实)
  * 修改该支撑代码可能破坏统一接口规范；若遇到问题建议通过 git diff 核对本段代码。
  * ======================================== */
+#ifndef RISCV_H
+#define RISCV_H
+
 #ifndef __ASSEMBLER__
 
 // which hart (core) is this?
@@ -419,3 +422,5 @@ typedef uint64 *pagetable_t; // 512 PTEs
 // Sv39, to avoid having to sign-extend virtual addresses
 // that have the high bit set.
 #define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
+
+#endif // RISCV_H

@@ -176,3 +176,12 @@ snprintf(char *buf, int n, const char *fmt, ...)
     b.buf[(b.len < n ? b.len : n - 1)] = '\0';
   return b.len;
 }
+
+// lab2: 内核致命错误出口 —— 打印后停机(不可返回)。
+void
+panic(char *s)
+{
+  printf("panic: %s\n", s);
+  for (;;)
+    asm volatile("wfi");
+}

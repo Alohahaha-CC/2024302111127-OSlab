@@ -1,0 +1,9 @@
+# lab2 冒烟 + 风暴脚本(inject_uart.py 驱动)
+SEND hi
+EXPECT user program running
+SEND badecall
+EXPECT TEST-1 PASS
+SEND bufstorm
+WAIT 200
+REPEAT 5 abcdefghijklmnopqrstuvwxyz0123456789
+EXPECT BUFSTORM
