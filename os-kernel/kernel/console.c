@@ -185,6 +185,7 @@ consoleread(int user_dst, uint64 dst, int n)
   return target - n;
 }
 
+//3.发字节
 // 用户 write(1, ...): 批量搬用户字节 → 串口。
 int
 consolewrite(int user_src, uint64 src, int n)

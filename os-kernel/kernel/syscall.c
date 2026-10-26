@@ -88,6 +88,7 @@ extern uint64 sys_read(void);
 extern uint64 sys_exec(void);
 extern uint64 sys_getpid(void);
 extern uint64 sys_write(void);
+extern uint64 sys_sbrk(void);
 
 // 调用号 → 处理函数的分发表(表驱动; 未实现项留空, 由 default 返回 -1)。
 static uint64 (*syscalls[])(void) = {
@@ -97,16 +98,18 @@ static uint64 (*syscalls[])(void) = {
   [SYS_read]   sys_read,
   [SYS_exec]   sys_exec,
   [SYS_getpid] sys_getpid,
+  [SYS_sbrk]   sys_sbrk,
   [SYS_write]  sys_write,
 };
 
+//1.查表
 void
 syscall(void)
 {
   int num;
   struct proc *p = myproc();
 
-  num = p->trapframe->a7;
+  num = p->trapframe->a7;//取出调用号
   if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
     // 调用并把返回值写回 a0。
     p->trapframe->a0 = syscalls[num]();

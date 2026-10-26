@@ -1,55 +1,176 @@
-// lab2 vm.c —— SV39 页表 + 简易页分配器。
+// lab3 vm.c —— SV39 三级页表 + 位图物理页分配器 + 受控拷贝 + 页表观测。
 //
-// 设计说明: 虽然 lab2 允许 "satp=0 直映" 作为过渡形态, 但经反汇编核实,
-// 赠送的用户程序(如 sh.c 的 static char buf[64])对全局变量采用**绝对寻址**
-// (li s0, 0x708 一类), 只有字符串字面量才是 auipc 相对寻址。绝对寻址要求
-// 用户虚拟地址 0 必须映射到程序的装载物理地址, 否则 sh 一运行就访问到无效的
-// 低地址。因此本实验提前建立最小 SV39 页表(内核恒等映射 + 用户从 VA 0 起),
-// 这是能跑起 sh 的唯一正确路径; 完整的内存管理留给 lab3 细化。
+// 相比 lab2 的三处升级:
+//   1. 物理页分配器: 由 bump(只增不回收) 换成**位图**, 每物理页 1 bit;
+//      O(1) 释放, 分配按 LAB3_ALLOC_ORDER(本学号=2 中点) 检索空闲位;
+//      可用上限受 LAB3_MEMCAP_DELTA 配额约束(空闲页 ≤ DELTA 时返回 0)。
+//   2. mappages 失败回滚: 拆除本调用已建立的部分映射并回收空中间页表。
+//   3. dump_pagetable: 按 dump_pagetable-ABI.md 输出页表结构。
+//
+// 回滚不变式(设计笔记 §"mappages 回滚一致性" 的落点):
+//   - mappages 只拥有**本次调用中新建的中间页表页**; 失败时拆除 [va,a) 的
+//     叶子映射(do_free=0, **不**释放调用方传入的物理页), 再回收空中间页表。
+//   - 调用方传入的叶子物理页释放职责归**调用方**(uvmalloc/loadseg 各自
+//     kfree 当前页 + uvmunmap(do_free=1) 已建页)。
+//
+// 分配器数据结构选型(设计笔记 §"阶段一" 的落点):
+//   位图 vs 有序链表 —— 链表释放需按地址插入 O(n), memcap 批量释放数万页
+//   退化为 O(n^2)(QEMU 下数分钟); 位图释放 O(1), 分配扫描空闲位, 元数据
+//   开销 128MB 仅 ~4KB(1 页), 故选位图。
 
 #include "types.h"
 #include "param.h"
 #include "memlayout.h"
 #include "riscv.h"
-#include "defs.h"
+#include "spinlock.h"
 #include "proc.h"
+#include "defs.h"
+#include "course_sid.h"
 
 pagetable_t kernel_pagetable;
 
 extern char etext[];      // kernel.ld 导出: 内核代码结束
-extern char end[];        // kernel.ld 导出: 内核镜像结束(堆起点)
+extern char end[];        // kernel.ld 导出: 内核镜像结束(空闲页起点)
 extern char trampoline[]; // trampoline.S
 
-// ---- 简易页分配器(lab2 用 bump 分配, 不回收; lab3 换成 freelist) ----
-static char *freemem = 0;
+// ---------------------------------------------------------------------------
+// 物理页分配器(位图 + 中点分配 + 配额)
+// ---------------------------------------------------------------------------
+
+static uint8 *freemap;      // 位图, 1=空闲
+static uint64 npages;       // 管理页总数
+static uint64 first_pa;     // 第一个可分配物理页地址(位图之后)
+static uint64 lo_free;      // 最低空闲页下标(维护)
+static uint64 hi_free;      // 最高空闲页下标(维护)
+static uint64 nfree;        // 当前空闲页数
+static struct spinlock kmem_lock;
+
+#define NONE  ((uint64)-1)
+#define BIT_INDEX(pa) (((uint64)(pa) - first_pa) >> PGSHIFT)
+#define BIT_TEST(i)   (freemap[(i) >> 3] & (1 << ((i) & 7)))
+#define BIT_SET(i)    (freemap[(i) >> 3] |= (1 << ((i) & 7)))
+#define BIT_CLR(i)    (freemap[(i) >> 3] &= ~(1 << ((i) & 7)))
+
+// 按 LAB3_ALLOC_ORDER 挑选一个空闲页下标; 无空闲返回 NONE。
+static uint64
+pick_free(void)
+{
+  uint64 i;
+
+#if LAB3_ALLOC_ORDER == 0
+  // 升序: 最低空闲位
+  return (lo_free != NONE) ? lo_free : NONE;
+#elif LAB3_ALLOC_ORDER == 1
+  // 降序: 最高空闲位
+  return (hi_free != NONE) ? hi_free : NONE;
+#else
+  // 中点(本学号 LAB3_ALLOC_ORDER==2): 空闲区间内最接近中点的空闲页
+  uint64 mid = (lo_free + hi_free) / 2;
+  uint64 range = hi_free - lo_free;
+  for (i = 0; i <= range; i++) {
+    if (mid >= lo_free + i && BIT_TEST(mid - i))
+      return mid - i;
+    if (mid + i <= hi_free && BIT_TEST(mid + i))
+      return mid + i;
+  }
+  return NONE;
+#endif
+}
+
+// 维护 lo_free/hi_free: 使它们精确指向最低/最高空闲位。
+static void
+fix_bounds(void)
+{
+  if (nfree == 0) {
+    lo_free = NONE;
+    hi_free = NONE;
+    return;
+  }
+  while (lo_free < npages && !BIT_TEST(lo_free))
+    lo_free++;
+  while (hi_free != NONE && !BIT_TEST(hi_free))
+    hi_free--;
+}
+
+// 回收分页表中所有"已无任何有效映射"的中间页表页(叶子不动, 根不动)。
+static void
+reclaim_empty(pagetable_t root);
 
 void
 kinit(void)
 {
-  freemem = (char *)PGROUNDUP((uint64)end);
+  uint64 start = PGROUNDUP((uint64)end);
+  uint64 map_bytes = PGROUNDUP((PHYSTOP - start) / PGSIZE / 8);
+
+  initlock(&kmem_lock, "kmem");
+
+  // 位图放在空闲区最前, 位图本身不参与分配。
+  freemap = (uint8 *)start;
+  first_pa = start + map_bytes;
+  npages = (PHYSTOP - first_pa) / PGSIZE;
+
+  memset(freemap, 0, map_bytes);
+  for (uint64 i = 0; i < npages; i++)
+    BIT_SET(i);
+
+  nfree = npages;
+  lo_free = 0;
+  hi_free = npages - 1;
 }
 
+// 分配一页(4KB 对齐、已清零); 空闲页数 ≤ LAB3_MEMCAP_DELTA 或耗尽返回 0。
 void *
 kalloc(void)
 {
-  void *p;
+  uint64 idx;
 
-  if (freemem == 0 || (uint64)freemem + PGSIZE > PHYSTOP)
+  acquire(&kmem_lock);
+  if (nfree <= LAB3_MEMCAP_DELTA) {
+    release(&kmem_lock);
     return 0;
-  p = (void *)freemem;
-  freemem += PGSIZE;
-  memset(p, 0, PGSIZE); // 清零: 空页表/空 trapframe/程序 bss 都依赖它
-  return p;
+  }
+  idx = pick_free();
+  if (idx == NONE) {
+    release(&kmem_lock);
+    return 0;
+  }
+  BIT_CLR(idx);
+  nfree--;
+  if (idx == lo_free || idx == hi_free)
+    fix_bounds();
+  release(&kmem_lock);
+
+  void *pa = (void *)(first_pa + idx * PGSIZE);
+  memset(pa, 0, PGSIZE); // 清零: 数据安全隔离(空页表/空页/程序 bss 依赖)
+  return pa;
 }
 
+// 释放一页: 先填垃圾数据(排查悬挂指针), 再置回空闲。
 void
 kfree(void *pa)
 {
-  // lab2 bump 分配器不回收, 泄漏由 lab3 的 kalloc 记账解决。
-  (void)pa;
+  if (((uint64)pa % PGSIZE) != 0 || (uint64)pa < first_pa ||
+      (uint64)pa >= PHYSTOP)
+    panic("kfree");
+
+  memset(pa, 1, PGSIZE); // junk: 释放后若仍被解引用将读到 0x01
+
+  acquire(&kmem_lock);
+  uint64 idx = BIT_INDEX(pa);
+  if (BIT_TEST(idx))
+    panic("kfree: double free");
+  BIT_SET(idx);
+  nfree++;
+  if (lo_free == NONE || idx < lo_free)
+    lo_free = idx;
+  if (hi_free == NONE || idx > hi_free)
+    hi_free = idx;
+  release(&kmem_lock);
 }
 
-// ---- 内核页表(恒等映射 + trampoline + 每进程内核栈) ----
+// ---------------------------------------------------------------------------
+// 内核页表
+// ---------------------------------------------------------------------------
 
 void
 kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
@@ -66,23 +187,23 @@ kvmmake(void)
   kpgtbl = (pagetable_t)kalloc();
   memset(kpgtbl, 0, PGSIZE);
 
-  // UART0 寄存器
+  // UART0 寄存器(必需)
   kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
-  // PLIC(平台级中断控制器, 一并覆盖到 0x10000000)
+  // PLIC(必需, 一并覆盖到 0x10000000)
   kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
 
-  // 内核代码段: 只读可执行
+  // 内核代码段: 只读可执行(kernel.ld 已导出 etext, 故可细分权限)
   kvmmap(kpgtbl, KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);
 
-  // 内核数据与其余物理内存(堆/用户页都从这里分配)
+  // 内核数据 + 全部可用物理内存(空闲页/页表页都在这)恒等映射至 PHYSTOP
   kvmmap(kpgtbl, (uint64)etext, (uint64)etext, PHYSTOP - (uint64)etext,
          PTE_R | PTE_W);
 
   // trampoline 映射到最高虚拟地址(用户/内核同一 VA)
   kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 
-  // 为每个进程槽位分配并映射内核栈
+  // 每个进程槽位的内核栈(高地址 KSTACK)
   proc_mapstacks(kpgtbl);
 
   return kpgtbl;
@@ -94,7 +215,6 @@ kvminit(void)
   kernel_pagetable = kvmmake();
 }
 
-// 打开分页: 把 satp 指向内核页表。
 void
 kvminithart(void)
 {
@@ -103,7 +223,9 @@ kvminithart(void)
   sfence_vma();
 }
 
-// ---- 三级页表基元 ----
+// ---------------------------------------------------------------------------
+// 三级页表基元
+// ---------------------------------------------------------------------------
 
 // 返回 va 对应的 PTE 地址; alloc!=0 时按需创建中间页表页。
 pte_t *
@@ -117,7 +239,7 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
     if (*pte & PTE_V) {
       pagetable = (pagetable_t)PTE2PA(*pte);
     } else {
-      if (!alloc || (pagetable = (pde_t *)kalloc()) == 0)
+      if (!alloc || (pagetable = (pagetable_t)kalloc()) == 0)
         return 0;
       memset(pagetable, 0, PGSIZE);
       *pte = PA2PTE(pagetable) | PTE_V;
@@ -126,7 +248,6 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
   return &pagetable[PX(0, va)];
 }
 
-// 查用户页: 返回 va 的物理地址, 未映射返回 0。
 uint64
 walkaddr(pagetable_t pagetable, uint64 va)
 {
@@ -148,6 +269,7 @@ walkaddr(pagetable_t pagetable, uint64 va)
 }
 
 // 为 [va, va+size) 建立到 [pa, pa+size) 的映射(需页对齐)。
+// 中途失败: 回滚已建立的部分映射(不释放调用方物理页)并回收中间页表。
 int
 mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 {
@@ -164,8 +286,12 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   a = va;
   last = va + size - PGSIZE;
   for (;;) {
-    if ((pte = walk(pagetable, a, 1)) == 0)
+    if ((pte = walk(pagetable, a, 1)) == 0) {
+      // 回滚: 拆除本调用已建的 [va, a) 叶子映射(物理页归调用方), 再回收空中间页表。
+      uvmunmap(pagetable, va, (a - va) / PGSIZE, 0);
+      reclaim_empty(pagetable);
       return -1;
+    }
     if (*pte & PTE_V)
       panic("mappages: remap");
     *pte = PA2PTE(pa) | perm | PTE_V;
@@ -177,7 +303,10 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   return 0;
 }
 
-// 建一个空用户页表。
+// ---------------------------------------------------------------------------
+// 用户地址空间
+// ---------------------------------------------------------------------------
+
 pagetable_t
 uvmcreate(void)
 {
@@ -189,7 +318,6 @@ uvmcreate(void)
   return pagetable;
 }
 
-// 从 va 开始去掉 npages 个映射; do_free 时释放物理页。
 void
 uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
@@ -212,7 +340,6 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   }
 }
 
-// 把用户内存从 oldsz 扩到 newsz(逐页分配), 返回新大小或 0。
 uint64
 uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 {
@@ -249,6 +376,7 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   if (PGROUNDUP(newsz) < PGROUNDUP(oldsz)) {
     int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
     uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
+    reclaim_empty(pagetable);
   }
 
   return newsz;
@@ -271,6 +399,30 @@ freewalk(pagetable_t pagetable)
   kfree((void *)pagetable);
 }
 
+static void
+reclaim_empty(pagetable_t root)
+{
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = root[i];
+    if (!(pte & PTE_V))
+      continue;
+    if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+      pagetable_t child = (pagetable_t)PTE2PA(pte);
+      reclaim_empty(child);
+      int empty = 1;
+      for (int j = 0; j < 512; j++)
+        if (child[j] & PTE_V) {
+          empty = 0;
+          break;
+        }
+      if (empty) {
+        root[i] = 0;
+        kfree((void *)child);
+      }
+    }
+  }
+}
+
 void
 uvmfree(pagetable_t pagetable, uint64 sz)
 {
@@ -279,7 +431,6 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
-// 复制父进程用户内存到子进程(含页表)。
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
@@ -289,6 +440,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   char *mem;
 
   for (i = 0; i < sz; i += PGSIZE) {
+    // guard page 等未映射空洞: 跳过(子进程同样保持该空洞)。
     if ((pte = walk(old, i, 0)) == 0)
       continue;
     if ((*pte & PTE_V) == 0)
@@ -310,7 +462,6 @@ err:
   return -1;
 }
 
-// 清掉 va 页的 U 位(exec 用它做用户栈守卫页)。
 void
 uvmclear(pagetable_t pagetable, uint64 va)
 {
@@ -322,7 +473,9 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
-// ---- 用户/内核内存互拷 ----
+// ---------------------------------------------------------------------------
+// 受控拷贝(逐页校验地址合法性与 PTE_U 权限)
+// ---------------------------------------------------------------------------
 
 int
 copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
@@ -416,4 +569,45 @@ copyinstr(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva,
   if (got_null)
     return 0;
   return -1;
+}
+
+// ---------------------------------------------------------------------------
+// 页表观测(dump_pagetable-ABI.md)
+// ---------------------------------------------------------------------------
+
+static void
+dump_level(pagetable_t pt, int level, uint64 va_base)
+{
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pt[i];
+    if (!(pte & PTE_V))
+      continue;
+
+    uint64 va = va_base | ((uint64)i << (PGSHIFT + 9 * level));
+    uint64 pa = PTE2PA(pte);
+
+    if (level > 0 && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+      // 非叶表项: 指向下一级页表
+      printf("L%d va=0x%lx pa=0x%lx perm=----\n", level, va, pa);
+      dump_level((pagetable_t)pa, level - 1, va);
+    } else {
+      // 叶子表项
+      char p[5];
+      p[0] = (pte & PTE_R) ? 'r' : '-';
+      p[1] = (pte & PTE_W) ? 'w' : '-';
+      p[2] = (pte & PTE_X) ? 'x' : '-';
+      p[3] = (pte & PTE_U) ? 'u' : '-';
+      p[4] = 0;
+      printf("LEAF va=0x%lx pa=0x%lx perm=%s\n", va, pa, p);
+    }
+  }
+}
+
+// 打印指定进程页表结构(与 lab0 地址空间快照图对齐)。进程无关, 可现场重放。
+void
+dump_pagetable(pagetable_t pagetable)
+{
+  printf("DUMP-PAGETABLE begin\n");
+  dump_level(pagetable, 2, 0);
+  printf("DUMP-PAGETABLE end\n");
 }

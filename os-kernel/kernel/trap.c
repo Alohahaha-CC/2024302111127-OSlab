@@ -55,7 +55,7 @@ usertrap(void)
     // 现场已存好, 打开中断让 UART/时钟能打断。
     intr_on();
 
-    syscall();
+    syscall();// 查表找到 sys_write，把 "hi" 发到串口
   } else if ((which_dev = devintr()) != 0) {
     // 设备/时钟中断, 已在 devintr 内处理。
   } else {

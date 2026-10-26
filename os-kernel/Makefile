@@ -27,7 +27,7 @@ kernel/kernel: $(OBJS) kernel/kernel.ld
 
 # ---------- 用户程序内嵌方案(Makefile.upgrade 规则, 整段照抄) ----------
 
-UPROGS = sh hi spin badecall bufstorm
+UPROGS = sh hi spin badecall bufstorm selftest badaccess memcap selftest3
 
 UFLAGS = -Wall -Werror -O -std=gnu99 -mcmodel=medany -ffreestanding \
          -nostdlib -fno-common -ggdb -march=rv64gc \
@@ -44,20 +44,15 @@ user-flat/%.bin: user/%.c user/user.h user/ulib.c user/printf.c user/usys.S
 	$(CC) $(UFLAGS) -Iuser -c user/printf.c -o user-flat/printf.o
 	$(CC) $(UFLAGS) -Iuser -c user/usys.S   -o user-flat/usys.o
 	$(CC) $(UFLAGS) -Iuser -c $<            -o user-flat/$*.o
-	$(LD) -T user/user.ld -o user-flat/$*.elf \
+	$(LD) -T user/user-data.ld -o user-flat/$*.elf \
 	    user-flat/$*.o user-flat/ulib.o user-flat/printf.o user-flat/usys.o
 	$(OBJCOPY) -O binary user-flat/$*.elf $@
 
-# 内嵌程序表(ABI, 勿改): 每项 = .quad start; .quad end; .asciz "name"; 以 {0,0} 结尾
-kernel/userimg.S: Makefile $(addprefix user-flat/,$(UPROGS:=.bin))
-	printf '.section .rodata\n .global _uprog_table\n_uprog_table:\n' > $@.tmp
-	for p in $(UPROGS); do \
-	  printf ' .quad _uprog_%s_start\n .quad _uprog_%s_end\n .asciz "%s"\n .balign 8\n' \
-	    $$p $$p $$p >> $@.tmp; \
-	  printf ' .global _uprog_%s_start\n_uprog_%s_start:\n .incbin "user-flat/%s.bin"\n .global _uprog_%s_end\n_uprog_%s_end:\n .balign 8\n' \
-	    $$p $$p $$p $$p $$p >> $@.tmp; \
-	done
-	printf ' .quad 0\n .quad 0\n' >> $@.tmp
+# 内嵌程序表(lab3 扩展 ABI): 每项 = start;end;data_start;mem_end;name, 连续存放,
+# 各程序二进制随后单独 .incbin; 以 {0,0,0,0} 结尾。表项与二进制分离, find_uprog
+# 按 32 + align8(strlen+1) 步进正确定位(data_start/mem_end 从 ELF 符号提取)。
+kernel/userimg.S: Makefile tools/gen_userimg.py $(addprefix user-flat/,$(UPROGS:=.bin))
+	python3 tools/gen_userimg.py $(UPROGS) > $@.tmp
 	mv $@.tmp $@
 
 # ---------- 运行与清理 ----------

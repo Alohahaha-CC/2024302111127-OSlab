@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lab2 控制流图 · 系统调用往返 与 键盘中断路径</title>
+<style>
+  :root {
+    --u: #dbeafe;      /* 用户态 蓝 */
+    --u-bd: #3b82f6;
+    --s: #fef3c7;      /* 内核态 黄 */
+    --s-bd: #d97706;
+    --hw: #ea580c;     /* 硬件动作 橙 */
+    --box: #ffffff;
+    --box-bd: #475569;
+    --txt: #1f2937;
+    --muted: #64748b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 20px 60px;
+    background: #f8fafc;
+    color: var(--txt);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  .sub { color: var(--muted); margin: 0 0 28px; font-size: 15px; }
+  h2 { font-size: 20px; margin: 44px 0 8px; }
+  h2 .no { color: var(--s-bd); }
+  .lead { color: var(--muted); margin: 0 0 16px; font-size: 14px; }
+  .card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 18px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+    overflow-x: auto;
+  }
+  svg { display: block; width: 100%; height: auto; }
+  /* 图例 */
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 16px 0 8px; font-size: 13px; }
+  .legend .item { display: flex; align-items: center; gap: 7px; }
+  .chip { width: 14px; height: 14px; border-radius: 4px; display: inline-block; border: 1px solid rgba(0,0,0,.15); }
+  .chip.u { background: var(--u); }
+  .chip.s { background: var(--s); }
+  .chip.hw { background: var(--hw); }
+  .chip.box { background: var(--box); border-color: var(--box-bd); }
+  .note { background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:14px 16px; margin-top:20px; font-size:14px; }
+  .note b { color: var(--s-bd); }
+  code { background:#f1f5f9; padding:1px 5px; border-radius:4px; font-size:.9em; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>lab2 控制流图</h1>
+  <p class="sub">系统调用往返（图①） · 键盘中断路径（图②） · 学号 2024302111127</p>
+
+  <div class="legend">
+    <span class="item"><span class="chip u"></span> 用户态 U</span>
+    <span class="item"><span class="chip s"></span> 内核态 S</span>
+    <span class="item"><span class="chip hw"></span> 硬件自动完成的动作（ecall / 中断）</span>
+    <span class="item"><span class="chip box"></span> 软件步骤（C 函数 / 汇编）</span>
+  </div>
+
+  <!-- ==================== 图① ==================== -->
+  <h2><span class="no">图①</span> 一次 write 系统调用的完整往返</h2>
+  <p class="lead">形状是一条「冲下去—横着走—爬回来」的过山车：用户态在<span style="color:var(--u-bd)">上方</span>、内核态在<span style="color:var(--s-bd)">下方</span>，中间一条粗虚线是特权级分界线。整条路径是一条主线，不分岔。</p>
+
+  <div class="card">
+  <svg viewBox="0 0 960 520" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="a" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+        <path d="M0,0 L9,4 L0,8 z" fill="#475569"/>
+      </marker>
+      <marker id="hw" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+        <path d="M0,0 L9,4 L0,8 z" fill="#ea580c"/>
+      </marker>
+    </defs>
+
+    <!-- 用户态泳道 -->
+    <rect x="16" y="24" width="928" height="120" rx="10" fill="#dbeafe"/>
+    <text x="32" y="52" font-size="14" font-weight="700" fill="#1d4ed8">用户态 (U)</text>
+
+    <!-- 内核态泳道 -->
+    <rect x="16" y="152" width="928" height="352" rx="10" fill="#fef3c7"/>
+    <text x="32" y="180" font-size="14" font-weight="700" fill="#b45309">内核态 (S)</text>
+
+    <!-- 特权级分界线 -->
+    <line x1="16" y1="152" x2="944" y2="152" stroke="#94a3b8" stroke-width="2" stroke-dasharray="8 5"/>
+
+    <!-- 用户态：起点 -->
+    <rect x="48" y="70" width="240" height="54" rx="8" fill="#fff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="168" y="92" font-size="13" text-anchor="middle" fill="#1f2937">用户程序</text>
+    <text x="168" y="110" font-size="13" text-anchor="middle" font-weight="600" fill="#0f172a">write(1, "hi", 2)</text>
+
+    <!-- 用户态：终点 -->
+    <rect x="688" y="70" width="240" height="54" rx="8" fill="#fff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="808" y="92" font-size="13" text-anchor="middle" fill="#1f2937">拿到返回值 a0</text>
+    <text x="808" y="110" font-size="13" text-anchor="middle" fill="#1f2937">从 ecall 下一条继续跑</text>
+
+    <!-- 内核态：五个环节 -->
+    <g font-size="13" text-anchor="middle">
+      <rect x="48" y="216" width="150" height="64" rx="8" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+      <text x="123" y="243" fill="#0f172a" font-weight="600">uservec</text>
+      <text x="123" y="262" fill="#64748b" font-size="12">trampoline · 存现场</text>
+
+      <rect x="236" y="216" width="150" height="64" rx="8" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+      <text x="311" y="243" fill="#0f172a" font-weight="600">usertrap</text>
+      <text x="311" y="262" fill="#64748b" font-size="12">看 scause 分发</text>
+
+      <rect x="424" y="216" width="150" height="64" rx="8" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+      <text x="499" y="243" fill="#0f172a" font-weight="600">sys_write</text>
+      <text x="499" y="262" fill="#64748b" font-size="12">把字节发到串口</text>
+
+      <rect x="612" y="216" width="160" height="64" rx="8" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+      <text x="692" y="243" fill="#0f172a" font-weight="600">usertrapret</text>
+      <text x="692" y="262" fill="#64748b" font-size="12">准备返回现场</text>
+
+      <rect x="812" y="216" width="140" height="64" rx="8" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+      <text x="882" y="243" fill="#0f172a" font-weight="600">userret</text>
+      <text x="882" y="262" fill="#64748b" font-size="12">恢复寄存器</text>
+    </g>
+
+    <!-- 内核态内部横向箭头 -->
+    <g stroke="#475569" stroke-width="1.8" fill="none" marker-end="url(#a)">
+      <line x1="198" y1="248" x2="232" y2="248"/>
+      <line x1="386" y1="248" x2="420" y2="248"/>
+      <line x1="574" y1="248" x2="608" y2="248"/>
+      <line x1="772" y1="248" x2="808" y2="248"/>
+    </g>
+
+    <!-- ecall 下行箭头（硬件） -->
+    <line x1="168" y1="124" x2="168" y2="212" stroke="#ea580c" stroke-width="2.5" marker-end="url(#hw)"/>
+    <text x="178" y="175" font-size="13" fill="#ea580c" font-weight="700">ecall</text>
+    <text x="178" y="192" font-size="11" fill="#ea580c">硬件：切 S 态 + 存 sepc</text>
+
+    <!-- sret 上行箭头（硬件） -->
+    <line x1="882" y1="212" x2="882" y2="128" stroke="#ea580c" stroke-width="2.5" marker-end="url(#hw)"/>
+    <text x="892" y="175" font-size="13" fill="#ea580c" font-weight="700">sret</text>
+    <text x="892" y="192" font-size="11" fill="#ea580c">硬件：降回 U 态 + 跳 sepc</text>
+
+    <!-- 关键标注：sepc+4 -->
+    <g font-size="11" fill="#64748b">
+      <text x="311" y="300" text-anchor="middle">epc = sepc + 4</text>
+      <text x="311" y="314" text-anchor="middle">（跳过 ecall，防原地打转）</text>
+    </g>
+  </svg>
+  </div>
+
+  <!-- ==================== 图② ==================== -->
+  <h2><span class="no">图②</span> 一次键盘中断的完整路径</h2>
+  <p class="lead">形状是一棵「倒着的树根」：一个触发（敲键盘）<span style="color:var(--hw)">分岔</span>成两条（用户态 / 内核态），最后又<span style="color:var(--hw)">汇合</span>到同一个处理函数，办完事原路返回。</p>
+
+  <div class="card">
+  <svg viewBox="0 0 960 660" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+    <defs>
+      <marker id="a2" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+        <path d="M0,0 L9,4 L0,8 z" fill="#475569"/>
+      </marker>
+      <marker id="hw2" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+        <path d="M0,0 L9,4 L0,8 z" fill="#ea580c"/>
+      </marker>
+    </defs>
+
+    <!-- 触发源 -->
+    <rect x="380" y="24" width="200" height="50" rx="8" fill="#fff" stroke="#ea580c" stroke-width="1.5"/>
+    <text x="480" y="47" font-size="13" text-anchor="middle" fill="#0f172a">用户敲键盘 <tspan font-weight="700">'h'</tspan></text>
+    <text x="480" y="63" font-size="11" text-anchor="middle" fill="#64748b">UART 收满 → 拉高中断线</text>
+
+    <line x1="480" y1="74" x2="480" y2="96" stroke="#ea580c" stroke-width="2.5" marker-end="url(#hw2)"/>
+
+    <!-- 判断菱形 -->
+    <polygon points="480,100 600,150 480,200 360,150" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+    <text x="480" y="147" font-size="13" text-anchor="middle" fill="#0f172a" font-weight="600">此刻在哪个态？</text>
+    <text x="480" y="164" font-size="11" text-anchor="middle" fill="#64748b">(看 sstatus.SPP)</text>
+
+    <!-- 分岔线 -->
+    <path d="M 420 188 C 380 210 300 220 205 232" stroke="#ea580c" stroke-width="2" fill="none"/>
+    <path d="M 540 188 C 580 210 660 220 755 232" stroke="#ea580c" stroke-width="2" fill="none"/>
+
+    <text x="300" y="216" font-size="12" fill="#ea580c" font-weight="700">在用户态 →</text>
+    <text x="640" y="216" font-size="12" fill="#ea580c" font-weight="700">← 在内核态</text>
+
+    <!-- 左支：用户态 -->
+    <rect x="120" y="238" width="170" height="56" rx="8" fill="#fff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="205" y="262" font-size="13" text-anchor="middle" fill="#0f172a" font-weight="600">uservec</text>
+    <text x="205" y="280" font-size="11" text-anchor="middle" fill="#64748b">trampoline 跳板</text>
+    <line x1="205" y1="294" x2="205" y2="316" stroke="#475569" stroke-width="1.8" marker-end="url(#a2)"/>
+
+    <rect x="120" y="320" width="170" height="56" rx="8" fill="#fff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="205" y="344" font-size="13" text-anchor="middle" fill="#0f172a" font-weight="600">usertrap</text>
+    <text x="205" y="362" font-size="11" text-anchor="middle" fill="#64748b">用户态陷入分发</text>
+
+    <!-- 右支：内核态 -->
+    <rect x="670" y="238" width="170" height="56" rx="8" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="755" y="262" font-size="13" text-anchor="middle" fill="#0f172a" font-weight="600">kernelvec</text>
+    <text x="755" y="280" font-size="11" text-anchor="middle" fill="#64748b">内核态陷入向量</text>
+    <line x1="755" y1="294" x2="755" y2="316" stroke="#475569" stroke-width="1.8" marker-end="url(#a2)"/>
+
+    <rect x="670" y="320" width="170" height="56" rx="8" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="755" y="344" font-size="13" text-anchor="middle" fill="#0f172a" font-weight="600">kerneltrap</text>
+    <text x="755" y="362" font-size="11" text-anchor="middle" fill="#64748b">内核态陷入分发</text>
+
+    <!-- 汇合线 -->
+    <path d="M 205 376 C 205 410 400 410 480 430" stroke="#ea580c" stroke-width="2" fill="none" marker-end="url(#hw2)"/>
+    <path d="M 755 376 C 755 410 560 410 480 430" stroke="#ea580c" stroke-width="2" fill="none" marker-end="url(#hw2)"/>
+
+    <!-- 汇合点 -->
+    <rect x="390" y="436" width="180" height="56" rx="8" fill="#fff" stroke="#d97706" stroke-width="2"/>
+    <text x="480" y="460" font-size="14" text-anchor="middle" fill="#0f172a" font-weight="700">devintr</text>
+    <text x="480" y="478" font-size="11" text-anchor="middle" fill="#64748b">两条路在这里汇合</text>
+
+    <line x1="480" y1="492" x2="480" y2="514" stroke="#475569" stroke-width="1.8" marker-end="url(#a2)"/>
+
+    <!-- 处理链 -->
+    <rect x="230" y="518" width="180" height="56" rx="8" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+    <text x="320" y="542" font-size="13" text-anchor="middle" fill="#0f172a" font-weight="600">plic_claim</text>
+    <text x="320" y="560" font-size="11" text-anchor="middle" fill="#64748b">问 PLIC：哪个设备？</text>
+
+    <rect x="430" y="518" width="180" height="56" rx="8" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+    <text x="520" y="542" font-size="13" text-anchor="middle" fill="#0f172a" font-weight="600">uartintr</text>
+    <text x="520" y="560" font-size="11" text-anchor="middle" fill="#64748b">读 RHR 取字符</text>
+
+    <rect x="630" y="518" width="180" height="56" rx="8" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+    <text x="720" y="542" font-size="13" text-anchor="middle" fill="#0f172a" font-weight="600">consoleintr</text>
+    <text x="720" y="560" font-size="11" text-anchor="middle" fill="#64748b">回显 + 入缓冲 + 唤醒</text>
+
+    <line x1="410" y1="546" x2="426" y2="546" stroke="#475569" stroke-width="1.8" marker-end="url(#a2)"/>
+    <line x1="610" y1="546" x2="626" y2="546" stroke="#475569" stroke-width="1.8" marker-end="url(#a2)"/>
+
+    <!-- 终点 -->
+    <rect x="330" y="608" width="300" height="40" rx="8" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="480" y="633" font-size="13" text-anchor="middle" fill="#334155">回到「被打断的那一点」继续跑</text>
+    <line x1="810" y1="574" x2="810" y2="600" stroke="#475569" stroke-width="1.5" fill="none"/>
+    <path d="M 810 600 L 630 600 L 630 628" stroke="#475569" stroke-width="1.5" fill="none" marker-end="url(#a2)"/>
+  </svg>
+  </div>
+
+  <div class="note">
+    <b>两张图合起来就一句话：</b>图① 是「用户<u>主动</u>下楼」（触发者是软件 —— 用户执行了 <code>ecall</code>），所以是单线往返、<code>sepc</code> 要 <code>+4</code> 跳过；图② 是「门铃响了，不管你在哪都得去开」（触发者是硬件 —— 敲键盘），所以要先分岔、再汇合，<code>sepc</code> <b>不能</b>动。它们都穿过同一条特权级分界线、都经过同一个 <code>trapframe</code>，只是「触发者」和「入口」不同。
+  </div>
+
+</div>
+</body>
+</html>

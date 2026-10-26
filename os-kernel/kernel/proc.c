@@ -411,6 +411,10 @@ forkret(void)
     p->trapframe->a0 = kexec("sh");
     if (p->trapframe->a0 < 0)
       panic("exec sh");
+
+    // lab3 观测规范: 首个用户态进程(sh)页表装配完成后, 自动打印一次页表 dump。
+    // dump_pagetable(pagetable_t) 进程无关, lab4 回归时可对任意进程重放。
+    dump_pagetable(p->pagetable);
   }
 
   usertrapret();

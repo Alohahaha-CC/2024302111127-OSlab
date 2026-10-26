@@ -38,6 +38,7 @@ int             copyinstr(pagetable_t, uint64, char *, uint64, uint64);
 pagetable_t     proc_pagetable(struct proc *);
 void            proc_freepagetable(pagetable_t, uint64);
 void            proc_mapstacks(pagetable_t);
+void            dump_pagetable(pagetable_t);
 
 // proc.c
 int             cpuid(void);

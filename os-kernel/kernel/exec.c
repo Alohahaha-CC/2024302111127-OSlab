@@ -1,14 +1,20 @@
-// lab2 exec.c —— 从内嵌程序表 _uprog_table 装载并执行程序。
+// lab3 exec.c —— 从内嵌程序表装载并执行程序(段级权限 + guard page)。
 //
-// 现阶段没有磁盘/文件系统(lab6 的债), 用户程序在编译期被 .incbin 进内核,
-// Makefile.upgrade 生成全局表 _uprog_table: 每项 = {u64 start; u64 end;
-// char name[]}(.balign 8), 以 {0,0} 结尾。这里按名字查找, 把平铺二进制
-// 拷到新页表的 VA 0, 伪造第一现场(epc=0, sp=栈顶)后返回, 由调用者 sret
-// 进用户态。
+// lab3 相对 lab2 的升级:
+//   - 程序表 ABI 扩展为 {start; end; data_start; mem_end; name}(tools/gen_userimg.py
+//     生成), data_start 标记"只读区结束/可写区起始"(页对齐), mem_end 标记
+//     进程内存总大小(含 bss)。
+//   - 段级权限: [0, data_start) 代码+只读数据 R+X(严禁 W, 供 badaccess TEST-3a
+//     校验写代码段被杀); [data_start, data_end) 数据+bss R+W。
+//   - 在数据之后、用户栈之前插入 LAB3_GUARD_PAGES 个保护页(未映射空洞),
+//     越界读写触发硬件缺页被 usertrap 安全终止。
 //
-// 设计要点: 平铺二进制不含 .bss(objcopy -O binary 只带文件内容), 而用户
-// 程序(如 sh 的 static char buf[64])的全局变量正是放在 .bss, 故装载时在
-// 二进制之后多清 2 页作为 bss 零区(程序都很小, 该余量绰绰有余)。
+// 用户地址空间布局(低→高, 与 lab0 快照图对齐):
+//   [0, data_start)  代码+只读数据  R+X+U
+//   [data_start, data_end) 数据+bss  R+W+U
+//   [data_end, stack_start) guard page ×LAB3_GUARD_PAGES (未映射)
+//   [stack_start, sz) 用户栈 1 页  R+W+U
+//   [sz, ...)         堆(向上增长, sbrk)
 
 #include "types.h"
 #include "param.h"
@@ -17,17 +23,19 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "course_sid.h"
 
-// 内嵌程序表(由 kernel/userimg.S 生成)。
+// 内嵌程序表(由 tools/gen_userimg.py 生成)。
 struct uprog {
-  uint64 start;
-  uint64 end;
-  // 紧接其后的 char name[](NUL 结尾, 8 字节对齐)
+  uint64 start;       // 程序二进制起始(.incbin, 基址 0)
+  uint64 end;         // 程序二进制末尾(不含 bss)
+  uint64 data_start;  // 只读区结束/可写区起始(页对齐)
+  uint64 mem_end;     // 进程内存总大小(end 符号, 含 bss)
 };
 
 extern uint64 _uprog_table[];
 
-// 按名字查程序表, 找不到返回 0。
+// 按名字查程序表, 找不到返回 0。表项连续存放, 每项 = 32 字节头 + align8(name)。
 static struct uprog *
 find_uprog(char *name)
 {
@@ -39,22 +47,54 @@ find_uprog(char *name)
     if (start == 0 && end == 0)
       return 0; // 表尾
 
-    char *n = (char *)(p + 2);
+    char *n = (char *)(p + 4);
     if (strncmp(n, name, strlen(name) + 1) == 0)
       return (struct uprog *)p;
 
-    // 下一项: 跳过 16 字节头 + 名字 + 对齐到 8。
-    uint64 sz = 16 + strlen(n) + 1;
+    uint64 sz = 32 + strlen(n) + 1;
     sz = (sz + 7) & ~7ull;
     p = (uint64 *)((char *)p + sz);
   }
 }
 
-// 装载 path 指向的内嵌程序到当前进程, 替换其用户内存。成功返回 0, 失败 -1。
+// 把内核内 [src, src+filesz) 的字节拷到用户页表 [va, va+memsz)(超出 filesz
+// 的部分清零), 权限 perm。失败返回 -1 并回滚本次已建立的映射与物理页。
+static int
+loadseg(pagetable_t pagetable, uint64 va, char *src, uint64 filesz,
+        uint64 memsz, int perm)
+{
+  uint64 i, n;
+  char *mem;
+
+  for (i = 0; i < memsz; i += PGSIZE) {
+    mem = kalloc();
+    if (mem == 0)
+      goto err;
+    memset(mem, 0, PGSIZE);
+    if (i < filesz) {
+      n = filesz - i;
+      if (n > PGSIZE)
+        n = PGSIZE;
+      memmove(mem, src + i, n);
+    }
+    if (mappages(pagetable, va + i, PGSIZE, (uint64)mem, perm) != 0) {
+      kfree(mem);
+      goto err;
+    }
+  }
+  return 0;
+
+err:
+  uvmunmap(pagetable, va, i / PGSIZE, 1);
+  return -1;
+}
+
+// 装载 path 指向的内嵌程序到当前进程, 替换其用户内存。成功返回 0, 失败 -1
+// (失败时保留原地址空间, 进程可继续运行)。
 int
 kexec(char *path)
 {
-  // sh 的 gets() 把行尾 '\n'/'\r' 也读进了命令名, 这里剥离尾部空白再查表。
+  // 剥离尾部空白(gets 把 '\n'/'\r' 也读进命令名)。
   char name[MAXPATH];
   int len = strlen(path);
   while (len > 0 && (path[len - 1] == '\n' || path[len - 1] == '\r' ||
@@ -70,39 +110,47 @@ kexec(char *path)
     return -1;
 
   struct proc *p = myproc();
-  uint64 size = up->end - up->start;
+  uint64 size = up->end - up->start;        // 二进制大小(.text+.rodata+.data)
+  uint64 data_start = up->data_start;       // 只读/可写边界(页对齐)
+  uint64 data_end = PGROUNDUP(up->mem_end); // 数据+bss 结束(页对齐)
+  uint64 stack_start = data_end + LAB3_GUARD_PAGES * PGSIZE;
+  uint64 sz = stack_start + PGSIZE;         // 初始 break = 堆起点 = 栈顶
   uint64 oldsz = p->sz;
   pagetable_t old = p->pagetable;
 
-  // 新页表(含 trampoline + trapframe 映射)。
   pagetable_t pt = proc_pagetable(p);
   if (pt == 0)
     return -1;
 
-  // 布局: [0, progsz) 程序(含 2 页 bss 余量), [progsz, progsz+PGSIZE) 用户栈。
-  uint64 progsz = PGROUNDUP(size) + 2 * PGSIZE;
-  uint64 total = progsz + PGSIZE;
-
-  if (uvmalloc(pt, 0, total, PTE_W | PTE_X) == 0)
+  // 代码+只读数据 [0, data_start) R+X+U
+  uint64 code_filesz = (size < data_start) ? size : data_start;
+  if (loadseg(pt, 0, (char *)up->start, code_filesz, data_start,
+              PTE_R | PTE_X | PTE_U) < 0)
     goto bad;
 
-  // 把二进制拷到 VA 0(uvmalloc 已把页清零, 覆盖后 bss 自然为 0)。
-  if (copyout(pt, total, 0, (char *)up->start, size) < 0)
+  // 数据+bss [data_start, data_end) R+W+U
+  uint64 data_filesz = (size > data_start) ? (size - data_start) : 0;
+  if (loadseg(pt, data_start, (char *)up->start + data_start, data_filesz,
+              data_end - data_start, PTE_R | PTE_W | PTE_U) < 0)
     goto bad;
 
-  // 提交新镜像。
+  // 用户栈 [stack_start, sz) R+W+U(guard 页为未映射空洞, 无需映射)
+  if (loadseg(pt, stack_start, 0, 0, PGSIZE, PTE_R | PTE_W | PTE_U) < 0)
+    goto bad;
+
+  // 提交新镜像, 释放旧地址空间。
   p->pagetable = pt;
-  p->sz = total;
+  p->sz = sz;
   safestrcpy(p->name, name, sizeof(p->name));
 
-  // 伪造第一现场: epc = 程序入口(VA 0 = main), sp = 用户栈顶。
+  // 伪造第一现场: epc = 程序入口(VA 0), sp = 用户栈顶。
   p->trapframe->epc = 0;
-  p->trapframe->sp = total;
+  p->trapframe->sp = sz;
 
   proc_freepagetable(old, oldsz);
   return 0;
 
 bad:
-  proc_freepagetable(pt, total);
+  proc_freepagetable(pt, sz);
   return -1;
 }

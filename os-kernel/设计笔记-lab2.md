@@ -25,18 +25,18 @@ RISC-V `-mcmodel=medany -fno-pie` 对**全局变量用绝对寻址**(`li s0, 0x7
 
 ## 1. 模块与文件清单
 
-| 模块 | 文件 | 职责 |
-|---|---|---|
-| 陷入跳板 | `kernel/trampoline.S`(赠送, 未改) | uservec 借 sscratch 存现场 / userret 恢复 |
-| 陷入分发 | `kernel/trap.c` | usertrap/usertrapret/kerneltrap/devintr/clockintr |
-| 系统调用 | `kernel/syscall.c` `sysproc.c` `sysfile.c` | 表驱动分发 + fork/exit/wait/getpid/read/write/exec |
-| 控制台 | `kernel/console.c` | 16550 RX 中断 + 环形缓冲 + 回显 |
-| 页表/分配 | `kernel/vm.c` | walk/mappages/uvm*/copy* + bump 页分配器 |
-| 进程 | `kernel/proc.c` | proc 表/fork/exit/wait/sleep/wakeup/scheduler |
-| 中断控制器 | `kernel/plic.c` | PLIC 使能与 claim/complete |
-| 装载 | `kernel/exec.c` | 从 `_uprog_table` 查名装载 |
-| 上下文切换 | `kernel/swtch.S` `kernelvec.S` | 内核上下文切换 / 内核态陷入向量 |
-| 内嵌程序表 | `kernel/userimg.S`(Makefile 生成) | `.incbin` 用户程序 + `_uprog_table` |
+| 模块       | 文件                                             | 职责                                               |
+| ---------- | ------------------------------------------------ | -------------------------------------------------- |
+| 陷入跳板   | `kernel/trampoline.S`(赠送, 未改)              | uservec 借 sscratch 存现场 / userret 恢复          |
+| 陷入分发   | `kernel/trap.c`                                | usertrap/usertrapret/kerneltrap/devintr/clockintr  |
+| 系统调用   | `kernel/syscall.c` `sysproc.c` `sysfile.c` | 表驱动分发 + fork/exit/wait/getpid/read/write/exec |
+| 控制台     | `kernel/console.c`                             | 16550 RX 中断 + 环形缓冲 + 回显                    |
+| 页表/分配  | `kernel/vm.c`                                  | walk/mappages/uvm*/copy* + bump 页分配器           |
+| 进程       | `kernel/proc.c`                                | proc 表/fork/exit/wait/sleep/wakeup/scheduler      |
+| 中断控制器 | `kernel/plic.c`                                | PLIC 使能与 claim/complete                         |
+| 装载       | `kernel/exec.c`                                | 从`_uprog_table` 查名装载                        |
+| 上下文切换 | `kernel/swtch.S` `kernelvec.S`               | 内核上下文切换 / 内核态陷入向量                    |
+| 内嵌程序表 | `kernel/userimg.S`(Makefile 生成)              | `.incbin` 用户程序 + `_uprog_table`            |
 
 ---
 
@@ -121,7 +121,7 @@ RISC-V `-mcmodel=medany -fno-pie` 对**全局变量用绝对寻址**(`li s0, 0x7
 - **两种语义差在哪几行**：只在 `consoleintr` 的提交条件(见 `console.c`)：
   - 字符流(我的参数=1)：每敲一个字符就 `cons.w = cons.e; wakeup(&cons.r)`；
   - 行缓冲(=0)：只有 `c == '\n'` 或缓冲满时才提交唤醒。
-  读取函数 `consoleread` 两种语义**完全一样**(都是逐字节取、遇 `\n` 返回)。
+    读取函数 `consoleread` 两种语义**完全一样**(都是逐字节取、遇 `\n` 返回)。
 
 ### 3.3 syscall 分发表怎么组织？错误码约定？
 
@@ -170,14 +170,14 @@ RISC-V `-mcmodel=medany -fno-pie` 对**全局变量用绝对寻址**(`li s0, 0x7
 
 ## 5. 自测结果(全部通过)
 
-| 测试 | 命令/方式 | 结果 |
-|---|---|---|
-| lab1 回归 banner | 启动观察 | `OSLAB1 sid=… mod97=0xe\n[chk=2275]` 逐字节正确 |
-| sh 启动 | `make qemu` | 出现 `sh> ` 提示符 |
-| hi | 键入 `hi` | `hi: user program running, pid=2` |
-| 非法调用号 | `badecall` | `TEST-1 PASS` |
-| spin + 键盘交错 | `spin` 运行时敲键盘 | 回显 `hello` 与 `spin N` 交错不乱 |
-| 缓冲边界 | `bufstorm` + `inject_uart.py --script storm.txt` | `BUFSTORM lines=4 bytes=148`，EXPECT 0 失败 |
+| 测试             | 命令/方式                                            | 结果                                               |
+| ---------------- | ---------------------------------------------------- | -------------------------------------------------- |
+| lab1 回归 banner | 启动观察                                             | `OSLAB1 sid=… mod97=0xe\n[chk=2275]` 逐字节正确 |
+| sh 启动          | `make qemu`                                        | 出现`sh> ` 提示符                                |
+| hi               | 键入`hi`                                           | `hi: user program running, pid=2`                |
+| 非法调用号       | `badecall`                                         | `TEST-1 PASS`                                    |
+| spin + 键盘交错  | `spin` 运行时敲键盘                                | 回显`hello` 与 `spin N` 交错不乱               |
+| 缓冲边界         | `bufstorm` + `inject_uart.py --script storm.txt` | `BUFSTORM lines=4 bytes=148`，EXPECT 0 失败      |
 
 - `python3 support/inject_uart.py --tree . --script storm.txt` → 三个 EXPECT 全 PASS。
 - `-d int` 无未处理异常。

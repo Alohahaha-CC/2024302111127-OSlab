@@ -26,6 +26,7 @@ sys_read(void)
   return consoleread(1, p, n);
 }
 
+//2。取参数
 uint64
 sys_write(void)
 {
