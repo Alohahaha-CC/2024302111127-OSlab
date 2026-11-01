@@ -61,3 +61,96 @@ sys_sbrk(void)
 
   return oldsz;
 }
+
+// lab4: SYS_pause(13) —— 当前进程休眠 n 个 tick 后返回。
+uint64
+sys_pause(void)
+{
+  int n;
+  argint(0, &n);
+  if (n <= 0)
+    return 0;
+
+  acquire(&tickslock);
+  uint64 end = (uint64)ticks + n;
+  while (ticks < end)
+    sleep(&ticks, &tickslock);
+  release(&tickslock);
+  return 0;
+}
+
+// lab4: SYS_schedstat(23) —— pid=-1 查自身; 写回累计/最近片长两个计数。
+uint64
+sys_schedstat(void)
+{
+  int pid, cpu, slice;
+  uint64 cpu_addr, slice_addr;
+  struct proc *p;
+
+  argint(0, &pid);
+  argaddr(1, &cpu_addr);
+  argaddr(2, &slice_addr);
+
+  if (pid == -1) {
+    p = myproc();
+    acquire(&p->lock);
+    cpu = p->cpu_ticks;
+    slice = p->last_slice_ticks;
+    release(&p->lock);
+  } else {
+    for (p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if (p->pid == pid && p->state != UNUSED && p->state != ZOMBIE) {
+        cpu = p->cpu_ticks;
+        slice = p->last_slice_ticks;
+        release(&p->lock);
+        goto out;
+      }
+      release(&p->lock);
+    }
+    return -1;   // 目标不存在或已退出
+  }
+
+out:
+  // 释放锁后再 copyout(访问用户页表不宜持锁)。
+  if (copyout(myproc()->pagetable, myproc()->sz, cpu_addr, (char *)&cpu,
+              sizeof(cpu)) < 0)
+    return -1;
+  if (copyout(myproc()->pagetable, myproc()->sz, slice_addr, (char *)&slice,
+              sizeof(slice)) < 0)
+    return -1;
+  return 0;
+}
+
+// lab4: SYS_time_rdtime(24) —— 返回 time CSR 计数(非 tick)。
+uint64
+sys_time_rdtime(void)
+{
+  return r_time();
+}
+
+// lab4: SYS_setickets(25) —— 设置本进程票数, 并重算步长。
+uint64
+sys_setickets(void)
+{
+  int tickets;
+  argint(0, &tickets);
+  if (tickets < 1)
+    return -1;
+
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  p->tickets = tickets;
+  p->stride = STRIDE_BIG / tickets;
+  release(&p->lock);
+  return 0;
+}
+
+// lab4: SYS_kill(6) —— 可选, 实现后测试结束更快。
+uint64
+sys_kill(void)
+{
+  int pid;
+  argint(0, &pid);
+  return kkill(pid);
+}

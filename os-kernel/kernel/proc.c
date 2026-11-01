@@ -45,6 +45,7 @@ proc_mapstacks(pagetable_t kpgtbl)
   }
 }
 
+//初始化 pid_lock、wait_lock
 void
 procinit(void)
 {
@@ -133,6 +134,13 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // lab4 调度参数默认值(exec 时按名重设 tickets)。
+  p->tickets = 1;
+  p->stride = STRIDE_BIG;
+  p->pass = 0;
+  p->cpu_ticks = 0;
+  p->last_slice_ticks = 0;
+
   return p;
 }
 
@@ -192,6 +200,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 }
 
 // 建第一个进程(initproc = sh), forkret 里会 exec("sh")。
+//占一个进程名额、分配好 trapframe 和空页表、把状态设成 RUNNABLE（就绪）
 void
 userinit(void)
 {
@@ -229,6 +238,11 @@ kfork(void)
   np->trapframe->a0 = 0;
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+
+  // lab4: 子进程继承父进程的调度参数。
+  np->tickets = p->tickets;
+  np->stride = p->stride;
+  np->pass = p->pass;
 
   pid = np->pid;
 
@@ -327,14 +341,11 @@ kwait(uint64 addr)
     }
 
     // 没有已退出的子进程, 睡觉等唤醒。
-    sleep_prepare(p);
-    release(&wait_lock);
-    sleep();
-    acquire(&wait_lock);
+    sleep(p, &wait_lock);
   }
 }
 
-// 调度器: 循环挑 RUNNABLE 进程切换过去(永不返回)。
+// 步长调度: 每轮在 RUNNABLE 中选 pass 最小者, 分派后 pass += stride。
 void
 scheduler(void)
 {
@@ -346,22 +357,35 @@ scheduler(void)
     // 避免所有进程都在睡时死锁: 打开中断收唤醒。
     intr_on();
 
-    int found = 0;
-    for (p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if (p->state == RUNNABLE) {
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-        c->proc = 0;
-        found = 1;
+    // 第一步: 扫描, 选出 pass 最小的就绪进程(持其锁)。
+    p = 0;
+    for (struct proc *q = proc; q < &proc[NPROC]; q++) {
+      acquire(&q->lock);
+      if (q->state == RUNNABLE) {
+        if (p == 0 || q->pass < p->pass) {
+          if (p)
+            release(&p->lock);
+          p = q;
+          continue;   // 保留 q 的锁, 跳过下方 release
+        }
       }
-      release(&p->lock);
+      release(&q->lock);
     }
-    if (!found) {
+
+    if (p == 0) {
       // 没有可运行进程, 停等中断。
       asm volatile("wfi");
+      continue;
     }
+
+    // 第二步: 交接。此处 p 已持锁。
+    p->state = RUNNING;
+    c->proc = p;
+    p->last_slice_ticks = 0;   // schedstat 规范: 分发时清零
+    p->pass += p->stride;      // 步长调度: 每个时间片 pass 前进一个 stride
+    swtch(&c->context, &p->context);
+    c->proc = 0;
+    release(&p->lock);
   }
 }
 
@@ -408,7 +432,7 @@ forkret(void)
 
   if (first) {
     first = 0;
-    p->trapframe->a0 = kexec("sh");
+    p->trapframe->a0 = kexec("sh");//1.把sh程序装进用户页表
     if (p->trapframe->a0 < 0)
       panic("exec sh");
 
@@ -424,29 +448,24 @@ forkret(void)
   ((void (*)(uint64))trampoline_userret)(satp);
 }
 
-// 登记等待通道(须先调用)。
+// 原子地: 释放条件锁 lk 并睡在 chan 上, 醒来后重新获取 lk。
+// 关键锁序: 先 acquire(&p->lock) 再 release(lk), 使"改 SLEEPING + 让出 CPU"
+// 与"wakeup 扫描"互斥, 从而消除丢失唤醒窗口。
 void
-sleep_prepare(void *chan)
+sleep(void *chan, struct spinlock *lk)
 {
   struct proc *p = myproc();
 
-  acquire(&p->lock);
+  acquire(&p->lock);   // 调用者已持 lk, noff: 1→2
+  release(lk);         // noff: 2→1, 只剩 p->lock
+
   p->chan = chan;
-  release(&p->lock);
-}
+  p->state = SLEEPING;
+  sched();             // noff==1, 满足 sched 不变式
 
-// 入睡(须 sleep_prepare 先登记通道)。
-void
-sleep(void)
-{
-  struct proc *p = myproc();
-
-  acquire(&p->lock);
-  if (p->chan != 0) {
-    p->state = SLEEPING;
-    sched();
-  }
+  p->chan = 0;
   release(&p->lock);
+  acquire(lk);         // 醒来重新拿回条件锁
 }
 
 // 唤醒所有睡在 chan 上的进程。
@@ -456,13 +475,11 @@ wakeup(void *chan)
   struct proc *p;
 
   for (p = proc; p < &proc[NPROC]; p++) {
+    if (p == myproc())
+      continue;
     acquire(&p->lock);
-    if (p->chan == chan) {
-      p->chan = 0;
-      if (p->state == SLEEPING) {
-        p->state = RUNNABLE;
-      }
-    }
+    if (p->state == SLEEPING && p->chan == chan)
+      p->state = RUNNABLE;
     release(&p->lock);
   }
 }
@@ -525,4 +542,17 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
     return copyin(p->pagetable, p->sz, dst, src, len);
   memmove(dst, (char *)src, len);
   return 0;
+}
+
+// ID 7(同 ID 5): 按进程名分配默认票数 hi=1 / spin=2 / sh=4, 其余默认 1。
+int
+default_tickets(char *name)
+{
+  if (strncmp(name, "hi", 3) == 0)
+    return 1;
+  if (strncmp(name, "spin", 5) == 0)
+    return 2;
+  if (strncmp(name, "sh", 3) == 0)
+    return 4;
+  return 1;
 }

@@ -28,10 +28,11 @@ kernel/kernel: $(OBJS) kernel/kernel.ld
 # ---------- 用户程序内嵌方案(Makefile.upgrade 规则, 整段照抄) ----------
 
 UPROGS = sh hi spin badecall bufstorm selftest badaccess memcap selftest3
+UPROGS += bench lottery_test stride_test alt
 
 UFLAGS = -Wall -Werror -O -std=gnu99 -mcmodel=medany -ffreestanding \
          -nostdlib -fno-common -ggdb -march=rv64gc \
-         -fno-stack-protector -fno-pie -I.
+         -fno-stack-protector -fno-pie -I. -DSID=2024302111127
 
 # usys 桩由 perl 脚本生成(课程赠送, 勿改)
 user/usys.S: user/usys.pl

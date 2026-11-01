@@ -143,6 +143,10 @@ kexec(char *path)
   p->sz = sz;
   safestrcpy(p->name, name, sizeof(p->name));
 
+  // lab4: 按进程名重设默认票数(hi=1/spin=2/sh=4)。
+  p->tickets = default_tickets(p->name);
+  p->stride = STRIDE_BIG / p->tickets;
+
   // 伪造第一现场: epc = 程序入口(VA 0), sp = 用户栈顶。
   p->trapframe->epc = 0;
   p->trapframe->sp = sz;

@@ -96,6 +96,7 @@ fix_bounds(void)
 static void
 reclaim_empty(pagetable_t root);
 
+//1.把“哪些物理页空闲、哪些物理页已被占用”的记账工作，交给一个叫位图分配器（bitmap allocator）的模块来负责。
 void
 kinit(void)
 {
@@ -106,7 +107,7 @@ kinit(void)
 
   // 位图放在空闲区最前, 位图本身不参与分配。
   freemap = (uint8 *)start;
-  first_pa = start + map_bytes;
+  first_pa = start + map_bytes;//真正可以分配的物理页的起始地址
   npages = (PHYSTOP - first_pa) / PGSIZE;
 
   memset(freemap, 0, map_bytes);
@@ -128,7 +129,7 @@ kalloc(void)
   if (nfree <= LAB3_MEMCAP_DELTA) {
     release(&kmem_lock);
     return 0;
-  }
+  }//空闲页<=7时直接失败
   idx = pick_free();
   if (idx == NONE) {
     release(&kmem_lock);
@@ -209,17 +210,19 @@ kvmmake(void)
   return kpgtbl;
 }
 
+
+//2.建内核页表，把内核镜像 + 全部物理内存恒等映射（地址照抄）
 void
 kvminit(void)
 {
-  kernel_pagetable = kvmmake();
+  kernel_pagetable = kvmmake();//建内核页表
 }
 
 void
 kvminithart(void)
 {
   sfence_vma();
-  w_satp(MAKE_SATP(kernel_pagetable));
+  w_satp(MAKE_SATP(kernel_pagetable));//打开分页，satp告诉 CPU 当前该使用哪一套页表来进行虚拟地址到物理地址的转换。
   sfence_vma();
 }
 

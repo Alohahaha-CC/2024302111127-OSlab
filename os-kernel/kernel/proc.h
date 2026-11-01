@@ -98,6 +98,15 @@ struct proc {
   uint64 kstack;           // 内核栈顶(KSTACK 虚拟地址)
   struct context context;  // swtch 上下文
   void *chan;              // sleep 等待通道
+
+  // lab4 观测与步长调度
+  int cpu_ticks;           // 累计 CPU tick
+  int last_slice_ticks;    // 最近一次连续运行 tick, 分发时清零
+  int tickets;             // 票数(步长/彩票策略)
+  uint64 stride;           // 步长 = STRIDE_BIG / tickets
+  uint64 pass;             // 步长调度累计 pass
 };
 
 extern struct proc proc[NPROC];
+
+#define STRIDE_BIG 1000000   // stride = STRIDE_BIG / tickets

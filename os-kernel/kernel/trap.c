@@ -10,6 +10,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "course_sid.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -17,6 +18,7 @@ uint ticks;
 extern char trampoline[], uservec[];
 void kernelvec(void);
 
+//初始化时钟锁
 void
 trapinit(void)
 {
@@ -57,7 +59,13 @@ usertrap(void)
 
     syscall();// 查表找到 sys_write，把 "hi" 发到串口
   } else if ((which_dev = devintr()) != 0) {
-    // 设备/时钟中断, 已在 devintr 内处理。
+    if (which_dev == 2) {
+      // 时钟中断(从用户态进入): 统计 CPU tick, 满一个时间片则抢占。
+      p->cpu_ticks++;
+      p->last_slice_ticks++;
+      if (p->last_slice_ticks >= LAB2_TICK)
+        yield();
+    }
   } else {
     // 其它异常(非法指令/越界): 打印关键寄存器后停机。
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(),
@@ -68,9 +76,6 @@ usertrap(void)
 
   if (killed(p))
     kexit(-1);
-
-  // lab2 "假调度": 时钟中断不抢 CPU, 直接返回原进程(lab4 才 yield)。
-  (void)which_dev;
 
   usertrapret();
 

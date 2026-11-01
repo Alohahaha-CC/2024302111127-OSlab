@@ -40,7 +40,7 @@ main()
 
   printf("\nOSLAB2: traps, syscalls, interrupt-driven console\n");
 
-  // ---- 建立环境 ----
+  // 建立环境 
   kinit();         // 页分配器(起点 = 内核镜像 end)
   kvminit();       // 建内核页表
   kvminithart();   // 打开分页

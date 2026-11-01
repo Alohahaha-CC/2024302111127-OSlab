@@ -89,6 +89,11 @@ extern uint64 sys_exec(void);
 extern uint64 sys_getpid(void);
 extern uint64 sys_write(void);
 extern uint64 sys_sbrk(void);
+extern uint64 sys_pause(void);
+extern uint64 sys_kill(void);
+extern uint64 sys_schedstat(void);
+extern uint64 sys_time_rdtime(void);
+extern uint64 sys_setickets(void);
 
 // 调用号 → 处理函数的分发表(表驱动; 未实现项留空, 由 default 返回 -1)。
 static uint64 (*syscalls[])(void) = {
@@ -100,6 +105,11 @@ static uint64 (*syscalls[])(void) = {
   [SYS_getpid] sys_getpid,
   [SYS_sbrk]   sys_sbrk,
   [SYS_write]  sys_write,
+  [SYS_pause]  sys_pause,
+  [SYS_kill]   sys_kill,
+  [SYS_schedstat]   sys_schedstat,
+  [SYS_time_rdtime] sys_time_rdtime,
+  [SYS_setickets]   sys_setickets,
 };
 
 //1.查表
