@@ -39,14 +39,15 @@ user/usys.S: user/usys.pl
 	perl user/usys.pl > user/usys.S
 
 # 用户程序 → 链接(基址 0)→ 平铺二进制
-user-flat/%.bin: user/%.c user/user.h user/ulib.c user/printf.c user/usys.S
+user-flat/%.bin: user/%.c user/user.h user/ulib.c user/printf.c user/usys.S user/common.c
 	mkdir -p user-flat
 	$(CC) $(UFLAGS) -Iuser -c user/ulib.c   -o user-flat/ulib.o
 	$(CC) $(UFLAGS) -Iuser -c user/printf.c -o user-flat/printf.o
 	$(CC) $(UFLAGS) -Iuser -c user/usys.S   -o user-flat/usys.o
+	$(CC) $(UFLAGS) -Iuser -c user/common.c -o user-flat/common.o
 	$(CC) $(UFLAGS) -Iuser -c $<            -o user-flat/$*.o
 	$(LD) -T user/user-data.ld -o user-flat/$*.elf \
-	    user-flat/$*.o user-flat/ulib.o user-flat/printf.o user-flat/usys.o
+	    user-flat/$*.o user-flat/ulib.o user-flat/printf.o user-flat/usys.o user-flat/common.o
 	$(OBJCOPY) -O binary user-flat/$*.elf $@
 
 # 内嵌程序表(lab3 扩展 ABI): 每项 = start;end;data_start;mem_end;name, 连续存放,
