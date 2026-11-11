@@ -30,7 +30,8 @@ main()
       asm volatile("wfi");
   }
 
-  consoleinit(); // 初始化 UART(开接收中断)
+  // ---- 初始化环境 ----
+  consoleinit(); // 1.初始化 UART(开接收中断)
 
   // ---- lab1 回归: banner(协议 2) ----
   char body[64];
@@ -40,10 +41,11 @@ main()
 
   printf("\nOSLAB2: traps, syscalls, interrupt-driven console\n");
 
-  // 建立环境 
+  // ---- 建立环境 ----
   kinit();         // 页分配器(起点 = 内核镜像 end)
   kvminit();       // 建内核页表
   kvminithart();   // 打开分页
+
   procinit();      // 进程表 + 内核栈映射
   trapinit();      // 时钟锁
   trapinithart();  // 内核态陷入向量

@@ -101,7 +101,7 @@ void
 kinit(void)
 {
   uint64 start = PGROUNDUP((uint64)end);
-  uint64 map_bytes = PGROUNDUP((PHYSTOP - start) / PGSIZE / 8);
+  uint64 map_bytes = PGROUNDUP((PHYSTOP - start) / PGSIZE / 8);//w位图占一页
 
   initlock(&kmem_lock, "kmem");
 
@@ -230,7 +230,7 @@ kvminithart(void)
 // 三级页表基元
 // ---------------------------------------------------------------------------
 
-// 返回 va 对应的 PTE 地址; alloc!=0 时按需创建中间页表页。
+// 1/返回 va 对应的 PTE 地址; alloc!=0 时按需创建中间页表页。
 pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
@@ -238,19 +238,20 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
     panic("walk");
 
   for (int level = 2; level > 0; level--) {
-    pte_t *pte = &pagetable[PX(level, va)];
+    pte_t *pte = &pagetable[PX(level, va)];//取这一级的索引
     if (*pte & PTE_V) {
       pagetable = (pagetable_t)PTE2PA(*pte);
     } else {
       if (!alloc || (pagetable = (pagetable_t)kalloc()) == 0)
         return 0;
       memset(pagetable, 0, PGSIZE);
-      *pte = PA2PTE(pagetable) | PTE_V;
+      *pte = PA2PTE(pagetable) | PTE_V;//建一张新页表
     }
   }
   return &pagetable[PX(0, va)];
 }
 
+// 3/根据页表和虚拟地址，查找对应的物理地址。
 uint64
 walkaddr(pagetable_t pagetable, uint64 va)
 {
@@ -271,7 +272,7 @@ walkaddr(pagetable_t pagetable, uint64 va)
   return pa;
 }
 
-// 为 [va, va+size) 建立到 [pa, pa+size) 的映射(需页对齐)。
+// 2/为 [va, va+size) 建立到 [pa, pa+size) 的映射(需页对齐)。虚拟地址和物理地址绑定。
 // 中途失败: 回滚已建立的部分映射(不释放调用方物理页)并回收中间页表。
 int
 mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
@@ -297,7 +298,7 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
     }
     if (*pte & PTE_V)
       panic("mappages: remap");
-    *pte = PA2PTE(pa) | perm | PTE_V;
+    *pte = PA2PTE(pa) | perm | PTE_V;//写入这一条映射
     if (a == last)
       break;
     a += PGSIZE;
